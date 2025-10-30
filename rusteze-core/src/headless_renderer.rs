@@ -512,12 +512,11 @@ impl HeadlessRenderer {
 
         for cube_opt in world.cubes_near_player(player_pos) {
             if let Some(c) = cube_opt {
-                if c.is_visible() {
-                    visible_cubes.push(InstanceData {
-                        position: c.position().as_array(),
-                        block_id: c.block_id() as u32,
-                    });
-                }
+                // Temporarily render all cubes regardless of visibility to debug
+                visible_cubes.push(InstanceData {
+                    position: c.position().as_array(),
+                    block_id: c.block_id() as u32,
+                });
             }
         }
 

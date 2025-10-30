@@ -53,7 +53,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // row = which row in the grid (vertical position)
     // col = which column in the row (horizontal position)
     let row = floor(texture_slot / textures_per_row);
-    let col = mod(texture_slot, textures_per_row);
+    let col = texture_slot % textures_per_row;
     
     // Calculate UV offset for this texture in the atlas
     // u is horizontal (x), v is vertical (y)

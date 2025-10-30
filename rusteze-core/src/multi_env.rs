@@ -5,7 +5,7 @@ use std::sync::Mutex;
 #[cfg(feature = "extension-module")]
 use pyo3::prelude::*;
 #[cfg(feature = "extension-module")]
-use numpy::{PyArray, IntoPyArray, PyArrayMethods};
+use numpy::{PyArray, PyArrayMethods};
 
 /// Multi-environment wrapper for parallel execution of multiple Rusteze environments.
 /// 
@@ -37,7 +37,7 @@ impl MultiRustezeEnv {
     /// 
     /// # Returns
     /// A vector of observation pixel data (RGB format).
-    pub fn reset_all(&mut self) -> Vec<Vec<u8>> {
+    pub fn reset_all_internal(&mut self) -> Vec<Vec<u8>> {
         self.envs
             .par_iter()
             .map(|env| {
@@ -57,7 +57,7 @@ impl MultiRustezeEnv {
     /// - `observations`: Vector of RGB pixel data.
     /// - `rewards`: Vector of reward values.
     /// - `dones`: Vector of done flags.
-    pub fn step_all(&mut self, actions: Vec<crate::game::actions::Action>) -> (Vec<Vec<u8>>, Vec<f32>, Vec<bool>) {
+    pub fn step_all_internal(&mut self, actions: Vec<crate::game::actions::Action>) -> (Vec<Vec<u8>>, Vec<f32>, Vec<bool>) {
         assert_eq!(actions.len(), self.envs.len(), "Number of actions must match number of environments");
         
         let results: Vec<(Vec<u8>, f32, bool)> = (0..self.envs.len())
@@ -85,7 +85,7 @@ impl MultiRustezeEnv {
     }
     
     fn reset_all(&mut self, py: Python) -> Vec<Py<PyArray<u8, numpy::Ix3>>> {
-        let observations = self.reset_all();
+        let observations = self.reset_all_internal();
         observations
             .into_iter()
             .map(|obs| {
@@ -107,41 +107,59 @@ impl MultiRustezeEnv {
                     crate::game::actions::Action::from_str(&json_str)
                 } else {
                     // Try to parse as dict with PlayerInput fields
-                    if let Ok(dict) = action_obj.downcast::<pyo3::types::PyDict>(py) {
+                    let bound = action_obj.bind(py);
+                    if let Ok(dict) = bound.downcast::<pyo3::types::PyDict>() {
                         let mut input = crate::game::actions::PlayerInput::default();
                         
                         // Parse camera
-                        if let Ok(camera) = dict.get_item("camera") {
-                            if let Ok(camera_list) = camera.and_then(|c| c.downcast::<pyo3::types::PyList>()) {
+                        if let Ok(Some(camera)) = dict.get_item("camera") {
+                            if let Ok(camera_list) = camera.downcast::<pyo3::types::PyList>() {
                                 if camera_list.len() == 2 {
-                                    if let (Ok(h), Ok(v)) = (
-                                        camera_list.get_item(0).and_then(|x| x.extract::<f32>()),
-                                        camera_list.get_item(1).and_then(|x| x.extract::<f32>()),
+                                    if let (Ok(h_item), Ok(v_item)) = (
+                                        camera_list.get_item(0),
+                                        camera_list.get_item(1),
                                     ) {
-                                        input.camera = Some([h, v]);
+                                        if let (Ok(h), Ok(v)) = (
+                                            h_item.extract::<f32>(),
+                                            v_item.extract::<f32>(),
+                                        ) {
+                                            input.camera = Some([h, v]);
+                                        }
                                     }
                                 }
                             }
                         }
                         
                         // Parse movement keys
-                        if let Ok(val) = dict.get_item("forward").and_then(|x| x.extract::<bool>()) {
-                            input.forward = val;
+                        if let Ok(Some(item)) = dict.get_item("forward") {
+                            if let Ok(val) = item.extract::<bool>() {
+                                input.forward = val;
+                            }
                         }
-                        if let Ok(val) = dict.get_item("back").and_then(|x| x.extract::<bool>()) {
-                            input.back = val;
+                        if let Ok(Some(item)) = dict.get_item("back") {
+                            if let Ok(val) = item.extract::<bool>() {
+                                input.back = val;
+                            }
                         }
-                        if let Ok(val) = dict.get_item("left").and_then(|x| x.extract::<bool>()) {
-                            input.left = val;
+                        if let Ok(Some(item)) = dict.get_item("left") {
+                            if let Ok(val) = item.extract::<bool>() {
+                                input.left = val;
+                            }
                         }
-                        if let Ok(val) = dict.get_item("right").and_then(|x| x.extract::<bool>()) {
-                            input.right = val;
+                        if let Ok(Some(item)) = dict.get_item("right") {
+                            if let Ok(val) = item.extract::<bool>() {
+                                input.right = val;
+                            }
                         }
-                        if let Ok(val) = dict.get_item("jump").and_then(|x| x.extract::<bool>()) {
-                            input.jump = val;
+                        if let Ok(Some(item)) = dict.get_item("jump") {
+                            if let Ok(val) = item.extract::<bool>() {
+                                input.jump = val;
+                            }
                         }
-                        if let Ok(val) = dict.get_item("attack").and_then(|x| x.extract::<bool>()) {
-                            input.attack = val;
+                        if let Ok(Some(item)) = dict.get_item("attack") {
+                            if let Ok(val) = item.extract::<bool>() {
+                                input.attack = val;
+                            }
                         }
                         
                         crate::game::actions::Action::from_player_input(input)
@@ -153,7 +171,7 @@ impl MultiRustezeEnv {
             rust_actions.push(action);
         }
         
-        let (observations, rewards, dones) = self.step_all(rust_actions);
+        let (observations, rewards, dones) = self.step_all_internal(rust_actions);
         
         let py_observations: Vec<Py<PyArray<u8, numpy::Ix3>>> = observations
             .into_iter()

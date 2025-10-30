@@ -5,6 +5,7 @@ use crate::headless_renderer::HeadlessRenderer;
 use crate::position::Position;
 use crate::reward_manager::RewardManager;
 use crate::server::game_server::GameServer;
+use crate::vector::Vector3;
 use crate::world::chunk::CHUNK_FLOOR;
 use crate::world::generation::world_generator::WorldGenerator;
 use crate::world::world::World;
@@ -12,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(feature = "extension-module")]
-use numpy::{IntoPyArray, PyArray, PyArrayMethods};
+use numpy::{PyArray, PyArrayMethods};
 #[cfg(feature = "extension-module")]
 use pyo3::prelude::*;
 
@@ -47,7 +48,7 @@ impl RustezeEnv {
     /// A new `RustezeEnv` instance ready to use.
     pub fn new(seed: u64) -> Self {
         // Initialize world generator with seed
-        let world = WorldGenerator::create_new_random_world(5);
+        let world = WorldGenerator::create_new_flat_world(5);
         let world = Arc::new(Mutex::new(world));
 
         // Create game server
@@ -55,8 +56,13 @@ impl RustezeEnv {
 
         // Create player
         let mut player = Player::new();
-        // Spawn higher to avoid collision issues
-        let spawn_pos = Position::spawn_position(CHUNK_FLOOR as f32 + 15.);
+        // Spawn much lower and look down to see terrain
+        let spawn_y = CHUNK_FLOOR as f32 + 2.; // Very low spawn height
+        let spawn_pos = Position::new(
+            Vector3::new(0., spawn_y, 0.),
+            0.,
+            -1.5, // Look almost straight down
+        );
         player.set_position(spawn_pos);
 
         // Create headless renderer (640x360 as specified in requirements)
@@ -83,14 +89,19 @@ impl RustezeEnv {
     /// A `Vec<u8>` containing RGB pixel data (width * height * 3 bytes).
     pub fn reset_internal(&mut self) -> Vec<u8> {
         // Regenerate world with same seed
-        let world = WorldGenerator::create_new_random_world(5);
+        let world = WorldGenerator::create_new_flat_world(5);
         *self.world.lock().unwrap() = world;
 
         // Reset game server
         self.game_server = GameServer::new(Arc::clone(&self.world));
 
-        // Reset player position (spawn higher to avoid collisions)
-        let spawn_pos = Position::spawn_position(CHUNK_FLOOR as f32 + 15.);
+        // Reset player position (spawn much lower and look down)
+        let spawn_y = CHUNK_FLOOR as f32 + 2.; // Very low spawn height
+        let spawn_pos = Position::new(
+            Vector3::new(0., spawn_y, 0.),
+            0.,
+            -1.5, // Look almost straight down
+        );
         self.player.set_position(spawn_pos);
 
         // Render initial frame
@@ -242,43 +253,59 @@ impl RustezeEnv {
                 Action::from_str(&json_str)
             } else {
                 // Try to parse as dict with PlayerInput fields
-                if let Ok(dict) = action_obj.downcast::<pyo3::types::PyDict>(py) {
+                let bound = action_obj.bind(py);
+                if let Ok(dict) = bound.downcast::<pyo3::types::PyDict>() {
                     let mut input = crate::game::actions::PlayerInput::default();
 
                     // Parse camera
-                    if let Ok(camera) = dict.get_item("camera") {
-                        if let Ok(camera_list) =
-                            camera.and_then(|c| c.downcast::<pyo3::types::PyList>())
-                        {
+                    if let Ok(Some(camera)) = dict.get_item("camera") {
+                        if let Ok(camera_list) = camera.downcast::<pyo3::types::PyList>() {
                             if camera_list.len() == 2 {
-                                if let (Ok(h), Ok(v)) = (
-                                    camera_list.get_item(0).and_then(|x| x.extract::<f32>()),
-                                    camera_list.get_item(1).and_then(|x| x.extract::<f32>()),
+                                if let (Ok(h_item), Ok(v_item)) = (
+                                    camera_list.get_item(0),
+                                    camera_list.get_item(1),
                                 ) {
-                                    input.camera = Some([h, v]);
+                                    if let (Ok(h), Ok(v)) = (
+                                        h_item.extract::<f32>(),
+                                        v_item.extract::<f32>(),
+                                    ) {
+                                        input.camera = Some([h, v]);
+                                    }
                                 }
                             }
                         }
                     }
 
                     // Parse movement keys
-                    if let Ok(val) = dict.get_item("forward").and_then(|x| x.extract::<bool>()) {
-                        input.forward = val;
+                    if let Ok(Some(item)) = dict.get_item("forward") {
+                        if let Ok(val) = item.extract::<bool>() {
+                            input.forward = val;
+                        }
                     }
-                    if let Ok(val) = dict.get_item("back").and_then(|x| x.extract::<bool>()) {
-                        input.back = val;
+                    if let Ok(Some(item)) = dict.get_item("back") {
+                        if let Ok(val) = item.extract::<bool>() {
+                            input.back = val;
+                        }
                     }
-                    if let Ok(val) = dict.get_item("left").and_then(|x| x.extract::<bool>()) {
-                        input.left = val;
+                    if let Ok(Some(item)) = dict.get_item("left") {
+                        if let Ok(val) = item.extract::<bool>() {
+                            input.left = val;
+                        }
                     }
-                    if let Ok(val) = dict.get_item("right").and_then(|x| x.extract::<bool>()) {
-                        input.right = val;
+                    if let Ok(Some(item)) = dict.get_item("right") {
+                        if let Ok(val) = item.extract::<bool>() {
+                            input.right = val;
+                        }
                     }
-                    if let Ok(val) = dict.get_item("jump").and_then(|x| x.extract::<bool>()) {
-                        input.jump = val;
+                    if let Ok(Some(item)) = dict.get_item("jump") {
+                        if let Ok(val) = item.extract::<bool>() {
+                            input.jump = val;
+                        }
                     }
-                    if let Ok(val) = dict.get_item("attack").and_then(|x| x.extract::<bool>()) {
-                        input.attack = val;
+                    if let Ok(Some(item)) = dict.get_item("attack") {
+                        if let Ok(val) = item.extract::<bool>() {
+                            input.attack = val;
+                        }
                     }
 
                     Action::from_player_input(input)

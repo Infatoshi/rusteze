@@ -186,11 +186,10 @@ impl Collidable for Cube {
     ) -> Option<CollisionData> {
         let cube_aabb = self.aabb();
 
+        // If already colliding, return None (can't compute collision time)
+        // This can happen if the player spawns inside or very close to a block
         if aabb.collides(&cube_aabb) {
-            dbg!(&aabb);
-            dbg!(&cube_aabb);
-
-            panic!("should not collide before !");
+            return None;
         }
 
         // if no collision, no need to bother
