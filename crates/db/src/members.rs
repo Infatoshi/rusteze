@@ -12,15 +12,15 @@ pub struct MemberRow {
 }
 
 pub async fn is_member(pool: &PgPool, server_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM members WHERE server_id = $1 AND user_id = $2",
+    let row: (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM members WHERE server_id = $1 AND user_id = $2)",
     )
     .bind(server_id)
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_one(pool)
     .await?;
 
-    Ok(row.is_some())
+    Ok(row.0)
 }
 
 pub async fn add_member(pool: &PgPool, server_id: Uuid, user_id: Uuid) -> DbResult<MemberRow> {
