@@ -1,0 +1,170 @@
+---
+description: Testing Stoat chat infrastructure on theodolos server. Connection, latency, CPU, network benchmarks. macOS-first development.
+globs:
+  - "**/*.rs"
+  - "**/*.toml"
+  - "**/Cargo.*"
+  - "**/bench/**"
+  - "**/tests/**"
+alwaysApply: false
+---
+
+# Stoat Infrastructure Testing — theodolos
+
+## Machine Specs
+
+**theodolos** (remote build/test server):
+- CPU: AMD Ryzen 9 9950X3D — 16 cores / 32 threads, boost to 5.76 GHz
+- RAM: 91 GB total (~45 GB available)
+- Storage: 3x Samsung 9100 PRO NVMe 1TB + WD Blue SA510 2TB SSD
+- Root disk: ~190 GB free on /dev/nvme0n1p3
+- Network: 1 Gbps ethernet, Tailscale mesh
+- OS: Pop!_OS 24.04 LTS (Linux 6.17, x86_64)
+- Rust: cargo 1.92.0
+- Docker: NOT installed
+- IP (Tailscale): 100.119.229.90
+- IP (LAN): 192.168.50.250
+
+**Development machine** (macOS, primary client dev):
+- Host: elliots-macbook-pro
+- Tailscale IP: 100.119.107.30
+- Target: macOS-first client development
+
+## No Sign-in Required
+
+Everything is public and runs locally. No GitHub auth, crates.io accounts, or API keys needed for development.
+
+## Directory Layout on theodolos
+
+```
+/home/infatoshi/
+├── stoat/                      # Source code
+│   ├── stoatchat/              # git clone of stoatchat/stoatchat
+│   ├── rust-authifier/         # git clone of stoatchat/rust-authifier
+│   └── target/                 # Shared cargo build output (release binaries here)
+├── services/                   # Runtime data
+│   ├── mongo-data/             # MongoDB data directory
+│   ├── redis-data/             # Redis persistence
+│   ├── minio-data/             # MinIO object storage
+│   └── rabbit-data/            # RabbitMQ data
+├── stoat-logs/                 # Service logs (delta.log, bonfire.log, etc.)
+├── minio                       # MinIO binary
+└── livekit-server              # LiveKit binary
+```
+
+## Installed Services
+
+All running natively (no Docker):
+- **MongoDB 8.0**: `sudo mongod --dbpath ~/services/mongo-data --port 27017 --fork --logpath ~/stoat-logs/mongod.log --bind_ip 0.0.0.0`
+- **Redis 7.0**: system service (`sudo systemctl start redis-server`)
+- **RabbitMQ**: system service (`sudo systemctl start rabbitmq-server`), user: rabbituser/rabbitpass
+- **MinIO**: `MINIO_ROOT_USER=minioautumn MINIO_ROOT_PASSWORD=minioautumn ~/minio server ~/services/minio-data --address ':14009' --console-address ':14010'`
+- **LiveKit**: `~/livekit-server --config ~/stoat/stoatchat/livekit.yml` (binary at ~/livekit-server)
+
+## Starting All Stoat Services
+
+```bash
+ssh theodolos bash << 'START'
+cd ~/stoat/stoatchat
+
+# Start infrastructure (if not already running)
+sudo mongod --dbpath ~/services/mongo-data --port 27017 --fork --logpath ~/stoat-logs/mongod.log --bind_ip 0.0.0.0 2>/dev/null
+sudo systemctl start redis-server 2>/dev/null
+sudo systemctl start rabbitmq-server 2>/dev/null
+MINIO_ROOT_USER=minioautumn MINIO_ROOT_PASSWORD=minioautumn nohup ~/minio server ~/services/minio-data --address ':14009' --console-address ':14010' > ~/stoat-logs/minio.log 2>&1 &
+
+# Start Stoat binaries
+nohup ~/stoat/target/release/revolt-delta    > ~/stoat-logs/delta.log    2>&1 &
+nohup ~/stoat/target/release/revolt-bonfire  > ~/stoat-logs/bonfire.log  2>&1 &
+nohup ~/stoat/target/release/revolt-autumn   > ~/stoat-logs/autumn.log   2>&1 &
+nohup ~/stoat/target/release/revolt-january  > ~/stoat-logs/january.log  2>&1 &
+START
+```
+
+## Building
+
+```bash
+ssh theodolos "cd ~/stoat/stoatchat && CARGO_TARGET_DIR=~/stoat/target cargo build --release"
+```
+
+## SSH Access
+
+```bash
+ssh theodolos
+
+# With port forwarding for all services
+ssh -L 27017:localhost:27017 \
+    -L 6379:localhost:6379 \
+    -L 14702:localhost:14702 \
+    -L 14703:localhost:14703 \
+    -L 14704:localhost:14704 \
+    -L 14705:localhost:14705 \
+    theodolos
+```
+
+## Service Endpoints (from macOS via Tailscale)
+
+| Service | URL | Port |
+|---------|-----|------|
+| REST API (delta) | http://100.119.229.90:14702 | 14702 |
+| WebSocket (bonfire) | ws://100.119.229.90:14703 | 14703 |
+| File server (autumn) | http://100.119.229.90:14704 | 14704 |
+| Link proxy (january) | http://100.119.229.90:14705 | 14705 |
+| MongoDB | mongodb://100.119.229.90:27017 | 27017 |
+| Redis | redis://100.119.229.90:6379 | 6379 |
+| MinIO Console | http://100.119.229.90:14010 | 14010 |
+
+## Architecture Decisions
+
+Target architecture (migrating from current):
+
+| Current | Target | Reason |
+|---------|--------|--------|
+| MongoDB | PostgreSQL | ACID, JOINs, full-text search, smaller footprint, type-safe schemas |
+| Redis | Redis (keep) | Pub/sub fan-out + ephemeral presence/voice state — perfect fit |
+| RabbitMQ | Redis Streams | Push notification queue only; overkill for single-consumer queue |
+| MinIO | Local FS (dev) / R2 (prod) | S3 abstraction stays, swap backend |
+| LiveKit | LiveKit (keep) | Best open-source SFU, has Rust SDK, correctly isolated |
+| Authifier (Rocket) | Custom auth (Axum) | Need phone, OAuth, WebAuthn, port to Axum |
+
+## macOS Client Development
+
+Rust-native client using GPU rendering (Zed-style):
+
+- **Rendering**: Metal via wgpu, custom shaders for UI primitives
+- **Window**: winit + raw-window-handle
+- **Text**: cosmic-text or Core Text via objc2
+- **Audio**: cpal for mic/speaker I/O
+- **Video**: LiveKit Rust SDK with VideoToolbox hardware codec
+- **Screen capture**: ScreenCaptureKit (macOS 12.3+)
+- **Local storage**: redb or rusqlite
+- **Credentials**: macOS Keychain via security-framework crate
+
+```bash
+# Build client locally on macOS
+cargo build --release --target aarch64-apple-darwin
+
+# Backend runs on theodolos, client on Mac, connected via Tailscale
+```
+
+## Performance Targets
+
+| Metric | Target | How to Measure |
+|--------|--------|---------------|
+| Tailscale latency | ~4ms | `ping 100.119.229.90` |
+| API response (p99) | < 50ms | `oha -n 10000 http://100.119.229.90:14702/` |
+| WebSocket connect | < 50ms | `time websocat ws://100.119.229.90:14703` |
+| Message e2e | < 100ms | Timestamp diff in client |
+| Voice join | < 500ms | Click to first audio |
+| Client FPS | 120 (Metal) | Instruments.app |
+| Client RAM (idle) | < 150 MB | Activity Monitor |
+| Cold start | < 1s | `time ./stoat-client` |
+| Backend idle RAM | < 120 MB total | `ps aux` (currently ~105 MB for all 4 services) |
+
+## Conventions
+
+- All paths on theodolos use `~/` (home directory on root filesystem)
+- Test with Tailscale IPs (100.x.x.x) to simulate real network conditions
+- Collect before/after metrics when making performance changes
+- Use `perf` and `flamegraph` on theodolos for CPU profiling
+- Use Instruments.app on macOS for client profiling

@@ -1,0 +1,14 @@
+[package]
+name = "rusteze-media"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusteze-db = { path = "../db" }
+rusteze-models = { path = "../models" }
+sqlx.workspace = true
+uuid.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
