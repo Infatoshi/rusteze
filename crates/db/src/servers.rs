@@ -26,11 +26,22 @@ pub async fn create_server(pool: &PgPool, name: &str, owner_id: Uuid) -> DbResul
     .fetch_one(pool)
     .await?;
 
+    // Add owner as member
     sqlx::query("INSERT INTO members (server_id, user_id) VALUES ($1, $2)")
         .bind(id)
         .bind(owner_id)
         .execute(pool)
         .await?;
+
+    // Auto-create #general text channel
+    let channel_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO channels (id, server_id, name, channel_type) VALUES ($1, $2, 'general', 'text')",
+    )
+    .bind(channel_id)
+    .bind(id)
+    .execute(pool)
+    .await?;
 
     Ok(row)
 }

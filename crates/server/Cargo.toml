@@ -27,3 +27,4 @@ tracing-subscriber.workspace = true
 dotenvy.workspace = true
 thiserror.workspace = true
 fred.workspace = true
+rand.workspace = true

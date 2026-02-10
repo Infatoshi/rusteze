@@ -5,6 +5,8 @@ pub mod messages;
 pub mod users;
 pub mod servers;
 pub mod channels;
+pub mod members;
+pub mod invites;
 
 #[derive(Debug, Error)]
 pub enum DbError {

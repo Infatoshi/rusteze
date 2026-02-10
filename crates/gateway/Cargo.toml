@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 rusteze-models = { path = "../models" }
+rusteze-db = { path = "../db" }
 rusteze-auth = { path = "../auth" }
 axum = { workspace = true, features = ["ws"] }
 tokio.workspace = true
@@ -19,4 +20,5 @@ uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 dotenvy.workspace = true
+sqlx.workspace = true
 futures = "0.3"

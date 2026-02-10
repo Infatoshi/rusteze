@@ -44,13 +44,23 @@ async fn main() {
     });
 
     let app = Router::new()
+        // Health
         .route("/", get(routes::root))
+        // Auth
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
+        // Servers
         .route("/servers", post(routes::servers::create_server))
         .route("/servers", get(routes::servers::list_servers))
+        // Channels
+        .route("/servers/{server_id}/channels", post(routes::channels::create_channel))
+        .route("/servers/{server_id}/channels", get(routes::channels::list_channels))
+        // Messages
         .route("/channels/{channel_id}/messages", get(routes::messages::list_messages))
         .route("/channels/{channel_id}/messages", post(routes::messages::send_message))
+        // Invites
+        .route("/servers/{server_id}/invites", post(routes::invites::create_invite))
+        .route("/invites/{code}/join", post(routes::invites::join_invite))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);

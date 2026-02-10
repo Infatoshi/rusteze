@@ -70,4 +70,5 @@ pub enum ClientEvent {
     Authenticate { token: String },
     Ping { ts: u64 },
     TypingStart { channel_id: Uuid },
+    Subscribe { channel_id: Uuid },
 }

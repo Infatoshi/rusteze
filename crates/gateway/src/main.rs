@@ -15,12 +15,14 @@ use fred::{
 };
 use futures::{SinkExt, StreamExt};
 use rusteze_models::{ClientEvent, ServerEvent};
+use sqlx::PgPool;
 use tokio::sync::broadcast;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 struct GatewayState {
     jwt_secret: String,
     redis_url: String,
+    db: PgPool,
 }
 
 #[tokio::main]
@@ -35,13 +37,19 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into());
     let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
     let bind = env::var("GATEWAY_BIND").unwrap_or_else(|_| "0.0.0.0:14703".into());
 
+    let db = rusteze_db::connect(&database_url)
+        .await
+        .expect("failed to connect to database");
+
     let state = Arc::new(GatewayState {
         jwt_secret,
         redis_url,
+        db,
     });
 
     let app = Router::new()
@@ -71,12 +79,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
                     match event {
                         ClientEvent::Authenticate { token } => {
                             match rusteze_auth::token::validate_token(&token, &state.jwt_secret) {
-                                Ok(claims) => {
-                                    let ack = serde_json::to_string(&ServerEvent::Pong { ts: 0 })
-                                        .unwrap();
-                                    let _ = sink.send(Message::Text(ack.into())).await;
-                                    break claims.sub;
-                                }
+                                Ok(claims) => break claims.sub,
                                 Err(_) => {
                                     let _ = sink.close().await;
                                     return;
@@ -98,6 +101,46 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
 
     tracing::info!("user {user_id} authenticated on gateway");
 
+    // Load user's data for Ready event
+    let servers = rusteze_db::servers::fetch_user_servers(&state.db, user_id)
+        .await
+        .unwrap_or_default();
+
+    let channel_ids = rusteze_db::members::user_channel_ids(&state.db, user_id)
+        .await
+        .unwrap_or_default();
+
+    // Build and send Ready event
+    let ready = ServerEvent::Ready {
+        user: rusteze_models::PartialUser {
+            id: user_id,
+            username: String::new(),
+            discriminator: String::new(),
+            display_name: None,
+            avatar_url: None,
+            status: rusteze_models::UserStatus::Online,
+        },
+        servers: servers
+            .iter()
+            .map(|s| rusteze_models::Server {
+                id: s.id,
+                name: s.name.clone(),
+                owner_id: s.owner_id,
+                icon_url: s.icon_url.clone(),
+                banner_url: s.banner_url.clone(),
+                description: s.description.clone(),
+                created_at: s.created_at,
+            })
+            .collect(),
+        channels: vec![], // channels loaded per-server by client
+        members: vec![],
+    };
+
+    let ready_json = serde_json::to_string(&ready).unwrap();
+    if sink.send(Message::Text(ready_json.into())).await.is_err() {
+        return;
+    }
+
     // Create a Redis subscriber for this connection
     let redis_config = RedisConfig::from_url(&state.redis_url).unwrap();
     let subscriber = match Builder::from_config(redis_config).build_subscriber_client() {
@@ -112,13 +155,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
         return;
     }
 
-    // Subscribe to user's personal channel for presence/DMs
+    // Subscribe to user's personal channel
     let _ = subscriber.subscribe(format!("user:{user_id}")).await;
 
-    // Use a broadcast channel to bridge Redis -> WebSocket
+    // Subscribe to all channels the user has access to
+    for ch_id in &channel_ids {
+        let _ = subscriber.subscribe(format!("channel:{ch_id}")).await;
+    }
+
+    tracing::info!(
+        "user {user_id} subscribed to {} channels",
+        channel_ids.len()
+    );
+
+    // Bridge Redis -> WebSocket via broadcast channel
     let (tx, mut rx) = broadcast::channel::<String>(256);
 
-    // Spawn Redis listener
     let mut message_rx = subscriber.message_rx();
     let tx_clone = tx.clone();
     tokio::spawn(async move {
@@ -129,7 +181,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
         }
     });
 
-    // Fan out: Redis events -> WebSocket, and WebSocket -> handle client messages
+    // Main event loop
     loop {
         tokio::select! {
             // Outbound: Redis -> Client
@@ -160,6 +212,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
                                             payload.as_str(),
                                         ).await;
                                     }
+                                }
+                                ClientEvent::Subscribe { channel_id } => {
+                                    let _ = subscriber.subscribe(format!("channel:{channel_id}")).await;
+                                    tracing::debug!("user {user_id} subscribed to channel:{channel_id}");
                                 }
                                 _ => {}
                             }
