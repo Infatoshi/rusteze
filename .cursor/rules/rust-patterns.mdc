@@ -1,0 +1,262 @@
+---
+description: Rust architecture patterns for rusteze. Stolen from Matrix/Continuwuity, Zed, and Discord engineering blogs. Apply to all Rust code in this project.
+globs:
+  - "**/*.rs"
+  - "**/Cargo.toml"
+alwaysApply: true
+---
+
+# Rust Patterns for Rusteze
+
+Patterns stolen from Matrix (Continuwuity), Zed (GPUI), and Discord engineering.
+Apply these consistently across the codebase.
+
+## 1. Error Types: Enum with Status Code Mapping
+
+Stolen from Continuwuity's `core/error/mod.rs`. Every error variant maps to an HTTP status code.
+Internal details are sanitized before reaching the client.
+
+```rust
+// Each crate defines its own error enum with thiserror
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    #[error("not found")]
+    NotFound,
+    #[error("already exists")]
+    AlreadyExists,
+    #[error("database error: {0}")]
+    Sqlx(#[from] sqlx::Error),
+}
+
+// The API layer maps crate errors -> HTTP responses
+// NEVER expose internal error messages (SQL errors, stack traces) to clients.
+// Pattern: match on variant, return a sanitized message.
+impl From<DbError> for ApiError {
+    fn from(e: DbError) -> Self {
+        match e {
+            DbError::NotFound => ApiError::not_found("not found"),
+            DbError::AlreadyExists => ApiError::conflict("already exists"),
+            DbError::Sqlx(_) => ApiError::internal("internal error"), // sanitized
+        }
+    }
+}
+```
+
+Rules:
+- Crate-level errors use `thiserror` with `#[from]` for automatic conversion
+- API errors implement `IntoResponse` and always return JSON `{"error": "message"}`
+- NEVER leak database error strings, file paths, or stack traces to clients
+- Use `tracing::error!` to log the real error server-side before sanitizing
+
+## 2. Events: Tagged Enums with Serde
+
+Stolen from both Matrix (ruma) and our own models. All WebSocket events are tagged enums.
+
+```rust
+// Server -> Client events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ServerEvent {
+    Ready { user: PartialUser, servers: Vec<Server> },
+    MessageCreate(Message),
+    TypingStart { channel_id: Uuid, user_id: Uuid },
+}
+
+// Client -> Server events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ClientEvent {
+    Authenticate { token: String },
+    Ping { ts: u64 },
+    Subscribe { channel_id: Uuid },
+}
+```
+
+Rules:
+- Always use `#[serde(tag = "type")]` — this produces `{"type": "MessageCreate", ...}` which is easy to parse in any language
+- ServerEvent variants that carry a full struct use tuple variant: `MessageCreate(Message)`
+- ServerEvent variants that are lightweight use struct variant: `TypingStart { channel_id, user_id }`
+- Keep event enums in `crates/models/src/event.rs` — they're shared between server and client
+
+## 3. IDs: UUID v7 (Time-Ordered)
+
+```rust
+let id = Uuid::now_v7();
+```
+
+Rules:
+- ALL entity IDs use UUID v7 — they sort chronologically, so `ORDER BY id DESC` = latest first
+- No need for a separate `created_at` index on high-volume tables (messages) — the ID already encodes time
+- Use `Uuid` from the `uuid` crate with features `["v4", "v7", "serde"]`
+- v4 for truly random IDs (invite codes, nonces), v7 for everything else
+
+## 4. Database: Query Functions, Not ORMs
+
+Stolen from Continuwuity's direct-query approach (they use RocksDB, we use PostgreSQL).
+
+```rust
+// Each table gets a module with free functions, not a repository struct
+// crates/db/src/messages.rs
+
+pub async fn create_message(pool: &PgPool, ...) -> DbResult<MessageRow> {
+    let id = Uuid::now_v7();
+    let row: MessageRow = sqlx::query_as("INSERT INTO ... RETURNING *")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+    Ok(row)
+}
+```
+
+Rules:
+- Use `sqlx::query_as` with `FromRow` derive — no compile-time checked macros (avoids requiring DATABASE_URL at build time)
+- One module per table: `users.rs`, `messages.rs`, `servers.rs`, `members.rs`
+- Row types are `#[derive(Debug, serde::Serialize, FromRow)]` — they go straight to JSON in responses
+- Functions take `&PgPool` as first argument, not `&self` on a struct
+- Cursor-based pagination using UUID v7: `WHERE id < $before ORDER BY id DESC LIMIT $n`
+
+## 5. Service Layer Separation
+
+Stolen from Continuwuity's crate structure: `core` -> `database` -> `service` -> `api` -> `router`.
+
+Our mapping:
+
+```
+models/     — shared types, event enums, no dependencies
+db/         — PostgreSQL queries, row types, migrations
+auth/       — password hashing, JWT, sessions (depends on db)
+media/      — file storage abstraction (depends on db)
+server/     — REST API handlers + router (depends on all above)
+gateway/    — WebSocket server (depends on models, auth, db)
+```
+
+Rules:
+- `models` has ZERO internal dependencies — it's shared between server, gateway, and future client
+- `db` depends only on `models` — it defines `Row` types that map 1:1 to SQL tables
+- Handler functions in `server/src/routes/` are thin — validate input, call db function, publish event, return JSON
+- Business logic that spans multiple tables goes in the handler, not in `db/`
+- The gateway NEVER writes to the database directly — it reads for Ready event, all writes go through the API
+
+## 6. Auth: Extractor Pattern
+
+Stolen from Axum's extractor design (which Continuwuity also uses via ruma's `Ruma` extractor).
+
+```rust
+pub struct AuthUser(pub Uuid);
+
+impl FromRequestParts<Arc<AppState>> for AuthUser {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
+        let token = parts.headers.get("authorization")...;
+        let claims = validate_token(token, &state.jwt_secret)?;
+        Ok(AuthUser(claims.sub))
+    }
+}
+```
+
+Rules:
+- Auth is an Axum extractor, not middleware — handlers that need auth include `user: AuthUser` in their signature
+- Unauthenticated routes simply don't include the extractor
+- The extractor returns only the user ID, not the full user — fetch user data explicitly if needed
+- Token validation is stateless (JWT) — no database call on every request
+
+## 7. Redis Pub/Sub: Channel Naming Convention
+
+```
+channel:{uuid}     — messages, typing indicators for a channel
+user:{uuid}        — DMs, presence updates, notifications for a user
+server:{uuid}      — server-wide events (member join/leave, role changes)
+```
+
+Rules:
+- API server PUBLISHES events after database writes
+- Gateway server SUBSCRIBES on behalf of connected WebSocket clients
+- One Redis subscriber per WebSocket connection (via `fred` crate's `SubscriberClient`)
+- Events are serialized as JSON strings matching `ServerEvent` enum variants
+- The gateway dynamically subscribes/unsubscribes as users join/leave servers
+
+## 8. Config: Feature Flags for Optional Capabilities
+
+Stolen from Continuwuity's extensive feature flag system.
+
+```toml
+[features]
+default = []
+media_thumbnails = ["dep:image"]
+url_previews = ["dep:webpage"]
+voice = ["dep:livekit"]
+oauth = ["dep:oauth2"]
+```
+
+Rules:
+- Heavy optional dependencies (image processing, voice, OAuth) behind feature flags
+- The core server binary is minimal by default
+- Feature flags map to conditional route mounting:
+
+```rust
+if cfg!(feature = "oauth") {
+    router = router
+        .route("/auth/google", get(routes::oauth::google_redirect))
+        .route("/auth/google/callback", get(routes::oauth::google_callback));
+}
+```
+
+## 9. Membership Guard Pattern
+
+Every channel-scoped operation must verify the user is a member of the channel's server.
+
+```rust
+async fn verify_channel_access(state: &AppState, user_id: Uuid, channel_id: Uuid) -> Result<(), ApiError> {
+    let server_id = members::channel_server_id(&state.db, channel_id).await?
+        .ok_or(ApiError::not_found("channel not found"))?;
+    if !members::is_member(&state.db, server_id, user_id).await? {
+        return Err(ApiError::forbidden("not a member of this server"));
+    }
+    Ok(())
+}
+```
+
+Rules:
+- This check runs before ANY read or write to a channel
+- Use `EXISTS` queries for membership checks — they short-circuit and use the index
+- For bulk operations (loading multiple channels), use a single JOIN query instead of N membership checks
+
+## 10. Partial Types for Updates and Public Views
+
+Stolen from Matrix/ruma's pattern of `Partial*` types for updates and privacy.
+
+```rust
+// Full type (internal, includes sensitive fields)
+pub struct User {
+    pub id: Uuid,
+    pub email: Option<String>,      // private
+    pub password_hash: String,       // never expose
+    pub username: String,
+    pub avatar_url: Option<String>,
+}
+
+// Partial type (public-facing, safe to send over the wire)
+pub struct PartialUser {
+    pub id: Uuid,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub status: UserStatus,
+}
+```
+
+Rules:
+- Database row types may include sensitive fields (password_hash, email)
+- API responses use partial/public types that exclude sensitive data
+- The `Ready` event sends `PartialUser`, not the full `User`
+- When another user views your profile, they get `PartialUser`
+
+## What We Did NOT Steal
+
+- **Federation / state resolution** — massive complexity for a feature normies don't want
+- **E2EE (Olm/Megolm)** — causes UX nightmares (UTD errors), add later if needed
+- **RocksDB** — PostgreSQL is simpler, better tooling, ACID transactions
+- **ruma types** — Matrix-specific, 50k+ lines, drags in the entire Matrix spec
+- **Room versions** — protocol versioning complexity for federation compat
+- **Custom forks of core crates** — Continuwuity forks `event-listener`, `async-channel`, `hyper-util`, `jemallocator`. We use upstream everything.
