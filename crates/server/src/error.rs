@@ -58,10 +58,15 @@ impl From<rusteze_auth::AuthError> for ApiError {
                     message: "invalid or expired token".into(),
                 }
             }
-            _ => ApiError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: "internal error".into(),
+            rusteze_auth::AuthError::InvalidMfaCode => ApiError {
+                status: StatusCode::UNAUTHORIZED,
+                message: "invalid mfa code".into(),
             },
+            rusteze_auth::AuthError::MfaRequired => ApiError {
+                status: StatusCode::FORBIDDEN,
+                message: "mfa_required".into(),
+            },
+            rusteze_auth::AuthError::Db(db_err) => ApiError::from(db_err),
         }
     }
 }

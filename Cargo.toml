@@ -7,6 +7,7 @@ members = [
     "crates/models",
     "crates/auth",
     "crates/media",
+    "crates/client",
 ]
 
 [workspace.package]
@@ -58,6 +59,10 @@ dotenvy = "0.15"
 
 # Crypto
 rand = "0.9"
+sha2 = "0.10"
+
+# HTTP client (for OAuth)
+reqwest = { version = "0.12", features = ["json"] }
 
 [profile.release]
 lto = true

@@ -64,6 +64,26 @@ pub async fn fetch_messages(
     Ok(rows)
 }
 
+pub async fn update_message(
+    pool: &PgPool,
+    id: Uuid,
+    channel_id: Uuid,
+    author_id: Uuid,
+    content: &str,
+) -> DbResult<MessageRow> {
+    let row: Option<MessageRow> = sqlx::query_as(
+        "UPDATE messages SET content = $1, edited_at = now() WHERE id = $2 AND channel_id = $3 AND author_id = $4 RETURNING *",
+    )
+    .bind(content)
+    .bind(id)
+    .bind(channel_id)
+    .bind(author_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.ok_or(crate::DbError::NotFound)
+}
+
 pub async fn delete_message(pool: &PgPool, id: Uuid, channel_id: Uuid) -> DbResult<()> {
     let result = sqlx::query("DELETE FROM messages WHERE id = $1 AND channel_id = $2")
         .bind(id)
@@ -75,4 +95,46 @@ pub async fn delete_message(pool: &PgPool, id: Uuid, channel_id: Uuid) -> DbResu
         return Err(crate::DbError::NotFound);
     }
     Ok(())
+}
+
+pub async fn pin_message(pool: &PgPool, id: Uuid, channel_id: Uuid) -> DbResult<MessageRow> {
+    let row: Option<MessageRow> = sqlx::query_as(
+        "UPDATE messages SET pinned = NOT pinned WHERE id = $1 AND channel_id = $2 RETURNING *",
+    )
+    .bind(id)
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.ok_or(crate::DbError::NotFound)
+}
+
+pub async fn fetch_pinned(pool: &PgPool, channel_id: Uuid) -> DbResult<Vec<MessageRow>> {
+    let rows: Vec<MessageRow> = sqlx::query_as(
+        "SELECT * FROM messages WHERE channel_id = $1 AND pinned = true ORDER BY created_at DESC",
+    )
+    .bind(channel_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// Search messages by content using full-text search.
+pub async fn search_messages(
+    pool: &PgPool,
+    channel_id: Uuid,
+    query: &str,
+    limit: i64,
+) -> DbResult<Vec<MessageRow>> {
+    let rows: Vec<MessageRow> = sqlx::query_as(
+        "SELECT * FROM messages WHERE channel_id = $1 AND to_tsvector('english', coalesce(content, '')) @@ plainto_tsquery('english', $2) ORDER BY id DESC LIMIT $3",
+    )
+    .bind(channel_id)
+    .bind(query)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
 }

@@ -46,6 +46,48 @@ pub async fn create_server(pool: &PgPool, name: &str, owner_id: Uuid) -> DbResul
     Ok(row)
 }
 
+pub async fn update_server(
+    pool: &PgPool,
+    id: Uuid,
+    name: Option<&str>,
+    description: Option<Option<&str>>,
+) -> DbResult<ServerRow> {
+    let current: ServerRow = sqlx::query_as("SELECT * FROM servers WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(crate::DbError::NotFound)?;
+
+    let new_name = name.unwrap_or(&current.name);
+    let new_desc = match description {
+        Some(d) => d.map(|s| s.to_string()),
+        None => current.description,
+    };
+
+    let row: ServerRow = sqlx::query_as(
+        "UPDATE servers SET name = $1, description = $2 WHERE id = $3 RETURNING *",
+    )
+    .bind(new_name)
+    .bind(new_desc)
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row)
+}
+
+pub async fn delete_server(pool: &PgPool, id: Uuid) -> DbResult<()> {
+    let result = sqlx::query("DELETE FROM servers WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(crate::DbError::NotFound);
+    }
+    Ok(())
+}
+
 pub async fn fetch_user_servers(pool: &PgPool, user_id: Uuid) -> DbResult<Vec<ServerRow>> {
     let rows: Vec<ServerRow> = sqlx::query_as(
         "SELECT s.* FROM servers s INNER JOIN members m ON m.server_id = s.id WHERE m.user_id = $1 ORDER BY s.created_at",

@@ -23,6 +23,7 @@ pub enum ServerEvent {
         id: Uuid,
         channel_id: Uuid,
         content: Option<String>,
+        edited_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     MessageDelete {
         id: Uuid,
@@ -38,6 +39,37 @@ pub enum ServerEvent {
     },
     ChannelDelete {
         id: Uuid,
+    },
+
+    // Servers
+    ServerUpdate {
+        id: Uuid,
+        name: Option<String>,
+        icon_url: Option<String>,
+    },
+
+    // Members
+    MemberJoin {
+        server_id: Uuid,
+        user: PartialUser,
+    },
+    MemberLeave {
+        server_id: Uuid,
+        user_id: Uuid,
+    },
+
+    // Reactions
+    ReactionAdd {
+        channel_id: Uuid,
+        message_id: Uuid,
+        user_id: Uuid,
+        emoji: String,
+    },
+    ReactionRemove {
+        channel_id: Uuid,
+        message_id: Uuid,
+        user_id: Uuid,
+        emoji: String,
     },
 
     // Presence
@@ -71,4 +103,5 @@ pub enum ClientEvent {
     Ping { ts: u64 },
     TypingStart { channel_id: Uuid },
     Subscribe { channel_id: Uuid },
+    UpdatePresence { status: crate::UserStatus },
 }

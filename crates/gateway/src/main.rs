@@ -14,7 +14,7 @@ use fred::{
     types::{Builder, config::Config as RedisConfig},
 };
 use futures::{SinkExt, StreamExt};
-use rusteze_models::{ClientEvent, ServerEvent};
+use rusteze_models::{ClientEvent, ServerEvent, UserStatus};
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -101,24 +101,83 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
 
     tracing::info!("user {user_id} authenticated on gateway");
 
-    // Load user's data for Ready event
+    // Load real user data
+    let user_row = match rusteze_db::users::find_by_id(&state.db, user_id).await {
+        Ok(u) => u,
+        Err(_) => {
+            let _ = sink.close().await;
+            return;
+        }
+    };
+
     let servers = rusteze_db::servers::fetch_user_servers(&state.db, user_id)
         .await
         .unwrap_or_default();
 
-    let channel_ids = rusteze_db::members::user_channel_ids(&state.db, user_id)
-        .await
-        .unwrap_or_default();
+    // Load all channels across all servers + DM channels
+    let mut all_channels = Vec::new();
+    let mut all_members = Vec::new();
 
-    // Build and send Ready event
+    for server in &servers {
+        if let Ok(channels) = rusteze_db::channels::fetch_server_channels(&state.db, server.id).await {
+            for ch in &channels {
+                all_channels.push(rusteze_models::Channel {
+                    id: ch.id,
+                    server_id: ch.server_id,
+                    name: ch.name.clone(),
+                    channel_type: match ch.channel_type.as_str() {
+                        "voice" => rusteze_models::ChannelType::Voice,
+                        "direct_message" => rusteze_models::ChannelType::DirectMessage,
+                        "group_dm" => rusteze_models::ChannelType::GroupDm,
+                        _ => rusteze_models::ChannelType::Text,
+                    },
+                    topic: ch.topic.clone(),
+                    position: ch.position,
+                    created_at: ch.created_at,
+                });
+            }
+        }
+
+        if let Ok(members) = rusteze_db::members::fetch_server_members(&state.db, server.id).await {
+            for m in &members {
+                all_members.push(rusteze_models::Member {
+                    server_id: m.server_id,
+                    user_id: m.user_id,
+                    nickname: m.nickname.clone(),
+                    roles: vec![], // Could load per-member roles if needed
+                    joined_at: m.joined_at,
+                });
+            }
+        }
+    }
+
+    // Also load DM channels
+    if let Ok(dms) = rusteze_db::dms::fetch_user_dms(&state.db, user_id).await {
+        for dm in &dms {
+            all_channels.push(rusteze_models::Channel {
+                id: dm.channel.id,
+                server_id: dm.channel.server_id,
+                name: dm.channel.name.clone(),
+                channel_type: match dm.channel.channel_type.as_str() {
+                    "group_dm" => rusteze_models::ChannelType::GroupDm,
+                    _ => rusteze_models::ChannelType::DirectMessage,
+                },
+                topic: dm.channel.topic.clone(),
+                position: dm.channel.position,
+                created_at: dm.channel.created_at,
+            });
+        }
+    }
+
+    // Build and send Ready event with real data
     let ready = ServerEvent::Ready {
         user: rusteze_models::PartialUser {
             id: user_id,
-            username: String::new(),
-            discriminator: String::new(),
-            display_name: None,
-            avatar_url: None,
-            status: rusteze_models::UserStatus::Online,
+            username: user_row.username,
+            discriminator: user_row.discriminator,
+            display_name: user_row.display_name,
+            avatar_url: user_row.avatar_url,
+            status: UserStatus::Online,
         },
         servers: servers
             .iter()
@@ -132,8 +191,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
                 created_at: s.created_at,
             })
             .collect(),
-        channels: vec![], // channels loaded per-server by client
-        members: vec![],
+        channels: all_channels,
+        members: all_members,
     };
 
     let ready_json = serde_json::to_string(&ready).unwrap();
@@ -141,8 +200,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
         return;
     }
 
-    // Create a Redis subscriber for this connection
+    // Create a Redis publisher for presence + typing events
     let redis_config = RedisConfig::from_url(&state.redis_url).unwrap();
+    let publisher = fred::clients::Client::new(redis_config.clone(), None, None, None);
+    if publisher.init().await.is_err() {
+        tracing::error!("failed to init redis publisher");
+        return;
+    }
+
+    // Broadcast presence: online
+    broadcast_presence(&publisher, user_id, UserStatus::Online, &servers).await;
+
+    // Create a Redis subscriber for this connection
     let subscriber = match Builder::from_config(redis_config).build_subscriber_client() {
         Ok(s) => s,
         Err(e) => {
@@ -159,8 +228,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
     let _ = subscriber.subscribe(format!("user:{user_id}")).await;
 
     // Subscribe to all channels the user has access to
+    let channel_ids = rusteze_db::members::user_channel_ids(&state.db, user_id)
+        .await
+        .unwrap_or_default();
+
     for ch_id in &channel_ids {
         let _ = subscriber.subscribe(format!("channel:{ch_id}")).await;
+    }
+
+    // Also subscribe to DM channel IDs
+    if let Ok(dms) = rusteze_db::dms::fetch_user_dms(&state.db, user_id).await {
+        for dm in &dms {
+            let _ = subscriber.subscribe(format!("channel:{}", dm.channel.id)).await;
+        }
     }
 
     tracing::info!(
@@ -207,7 +287,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
                                     };
                                     if let Ok(payload) = serde_json::to_string(&event) {
                                         let _: Result<(), _> = PubsubInterface::publish(
-                                            &subscriber,
+                                            &publisher,
                                             format!("channel:{channel_id}"),
                                             payload.as_str(),
                                         ).await;
@@ -216,6 +296,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
                                 ClientEvent::Subscribe { channel_id } => {
                                     let _ = subscriber.subscribe(format!("channel:{channel_id}")).await;
                                     tracing::debug!("user {user_id} subscribed to channel:{channel_id}");
+                                }
+                                ClientEvent::UpdatePresence { status } => {
+                                    broadcast_presence(&publisher, user_id, status, &servers).await;
                                 }
                                 _ => {}
                             }
@@ -228,6 +311,43 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>) {
         }
     }
 
+    // User disconnected — broadcast offline presence
+    broadcast_presence(&publisher, user_id, UserStatus::Offline, &servers).await;
+
     tracing::info!("user {user_id} disconnected from gateway");
     let _ = subscriber.quit().await;
+    let _ = publisher.quit().await;
+}
+
+/// Broadcast a presence update to all servers the user is in.
+async fn broadcast_presence(
+    redis: &fred::clients::Client,
+    user_id: uuid::Uuid,
+    status: UserStatus,
+    servers: &[rusteze_db::servers::ServerRow],
+) {
+    let event = ServerEvent::PresenceUpdate {
+        user_id,
+        status,
+    };
+
+    if let Ok(payload) = serde_json::to_string(&event) {
+        // Broadcast to the user's personal channel (for their own clients)
+        let _: Result<(), _> = PubsubInterface::publish(
+            redis,
+            format!("user:{user_id}"),
+            payload.as_str(),
+        )
+        .await;
+
+        // Broadcast to all servers so other members see the update
+        for server in servers {
+            let _: Result<(), _> = PubsubInterface::publish(
+                redis,
+                format!("server:{}", server.id),
+                payload.as_str(),
+            )
+            .await;
+        }
+    }
 }

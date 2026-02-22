@@ -28,3 +28,6 @@ dotenvy.workspace = true
 thiserror.workspace = true
 fred.workspace = true
 rand.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+base64 = "0.22"

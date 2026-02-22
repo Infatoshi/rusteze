@@ -4,4 +4,5 @@ pub struct AppState {
     pub db: PgPool,
     pub redis: fred::clients::Client,
     pub jwt_secret: String,
+    pub media: rusteze_media::LocalStorage,
 }

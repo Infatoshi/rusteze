@@ -252,6 +252,66 @@ Rules:
 - The `Ready` event sends `PartialUser`, not the full `User`
 - When another user views your profile, they get `PartialUser`
 
+## 11. GPUI Client Patterns
+
+### Keyboard Shortcuts (Zed Pattern)
+```rust
+// In the view struct:
+focus_handle: FocusHandle,
+
+// In constructor:
+let focus_handle = cx.focus_handle();
+focus_handle.focus(window);
+
+// In render — register on the root div:
+div()
+    .id("app-root")
+    .track_focus(&self.focus_handle)
+    .key_context("AppRoot")
+    .on_action(cx.listener(|this, _: &ToggleSettings, _w, cx| { ... }))
+
+// In main.rs — bind keys scoped to context:
+cx.bind_keys([
+    KeyBinding::new("cmd-,", ToggleSettings, Some("AppRoot")),
+]);
+```
+
+### Entity Observation for Reactive Re-rendering
+Every view that reads from `AppState` MUST observe it:
+```rust
+cx.observe(&state, |_this, _state, cx| { cx.notify(); }).detach();
+```
+Without this, the view won't re-render when state changes.
+
+### Background Executor for Blocking I/O
+```rust
+let task = cx.background_executor().spawn(async move {
+    crate::api::fetch_messages(&api_url, &token, ch_id, None)
+});
+cx.spawn(async move |_this, cx| {
+    let result = task.await;
+    let _ = cx.update(|cx| {
+        state.update(cx, |state, cx| { /* update state */ cx.notify(); });
+    });
+}).detach();
+```
+
+### Gateway Bidirectional Channel
+```rust
+// gateway.rs returns a Sender<ClientEvent>
+let cmd_tx = crate::gateway::spawn_gateway(url, token, event_tx);
+state.gateway_tx = Some(cmd_tx);
+
+// Send from anywhere via state:
+state.send_gateway(ClientEvent::Subscribe { channel_id });
+```
+
+### Theme System
+```rust
+let t = self.state.read(cx).theme_colors();
+div().bg(rgb(t.bg_primary)).text_color(rgb(t.text_primary))
+```
+
 ## What We Did NOT Steal
 
 - **Federation / state resolution** — massive complexity for a feature normies don't want

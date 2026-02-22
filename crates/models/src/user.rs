@@ -11,6 +11,8 @@ pub struct User {
     pub avatar_url: Option<String>,
     pub email: Option<String>,
     pub phone: Option<String>,
+    pub bio: Option<String>,
+    pub banner_url: Option<String>,
     pub status: UserStatus,
     pub flags: u32,
     pub created_at: DateTime<Utc>,
@@ -19,8 +21,14 @@ pub struct User {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfile {
+    pub id: Uuid,
+    pub username: String,
+    pub discriminator: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
     pub bio: Option<String>,
     pub banner_url: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

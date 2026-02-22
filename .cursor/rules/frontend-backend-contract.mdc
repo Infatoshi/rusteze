@@ -1,0 +1,57 @@
+---
+description: Rules for implementing features end-to-end across the GPUI client and Rust backend
+globs: crates/client/**/*.rs,crates/server/**/*.rs,crates/db/**/*.rs
+alwaysApply: false
+---
+
+# Frontend-Backend Contract
+
+## Data Flow Rules
+
+1. **Every client action that modifies data MUST call a backend API endpoint.** Never modify local state optimistically without a server round-trip for persistent data.
+
+2. **The gateway event handler is the single source of truth for real-time updates.** When the backend broadcasts an event (MessageCreate, ChannelCreate, etc.), the client's `app_root::handle_server_event` processes it. Do NOT also push data from the API response — this causes duplicates.
+
+3. **API responses are for confirmation only.** Use them to verify success, extract IDs, or handle errors — but don't push the returned data into `AppState.channels`/`messages`/etc. if a gateway event will also deliver it. Exception: data that the gateway doesn't broadcast (like profile updates, read states).
+
+4. **Deduplicate in the event handler.** Always check `if !state.X.iter().any(|x| x.id == new.id)` before pushing, as a safety net.
+
+## GPUI Event Ordering
+
+5. **`on_mouse_down` fires BEFORE `on_click`.** Never dismiss parent state (like clearing a context menu) in `on_mouse_down` if child elements use `on_click` — the child's click handler will never fire because the element gets removed during re-render.
+
+6. **Dismiss context menus inside action handlers.** Set `self.context_menu = None` at the start of every handler (select, delete, rename, create). This way the action executes AND the menu closes in the same update cycle.
+
+7. **Never use empty `on_mouse_down` blockers.** `.on_mouse_down(MouseButton::Left, |_e, _w, _cx| {})` blocks ALL left-click events including `on_click` on children. It doesn't "stop propagation" — it eats the event.
+
+## Context Menu Pattern
+
+8. **Store context menu state as `Option<(id, data...)>` in the view struct.** Render the menu inline using `flat_map` in the children iterator, right after the element that was right-clicked. This positions the menu correctly.
+
+```rust
+// In the view struct:
+context_menu: Option<(Uuid, String)>,
+
+// In render, use flat_map:
+.children(items.into_iter().flat_map(|(id, name)| {
+    let mut elements = vec![render_item(id, name)];
+    if self.context_menu == Some(id) {
+        elements.push(render_context_menu(id));
+    }
+    elements
+}))
+```
+
+## Testing Contract
+
+9. **Every backend route needs a corresponding integration test.** Tests live in `crates/client/tests/integration.rs`, are `#[ignore]`, and run with `cargo test -p rusteze-client -- --ignored`.
+
+10. **Each test creates its own user** via `register(unique_email())` to avoid state conflicts between tests.
+
+11. **Test the full lifecycle:** create -> verify exists -> modify -> verify changed -> delete -> verify gone.
+
+## Backend Broadcasting
+
+12. **Broadcast events to ONE channel per server**, not all channels. Broadcasting to N channels sends N duplicate events. Use the first channel (e.g., #general) as the broadcast target.
+
+13. **Always broadcast mutations.** When a channel/server/member changes, the backend must publish a gateway event so all connected clients update in real-time.

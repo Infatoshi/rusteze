@@ -35,6 +35,48 @@ pub async fn create_channel(
     Ok(row)
 }
 
+pub async fn update_channel(
+    pool: &PgPool,
+    id: Uuid,
+    name: Option<&str>,
+    topic: Option<Option<&str>>,
+) -> DbResult<ChannelRow> {
+    let current: ChannelRow = sqlx::query_as("SELECT * FROM channels WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(crate::DbError::NotFound)?;
+
+    let new_name = name.unwrap_or(&current.name);
+    let new_topic = match topic {
+        Some(t) => t.map(|s| s.to_string()),
+        None => current.topic,
+    };
+
+    let row: ChannelRow = sqlx::query_as(
+        "UPDATE channels SET name = $1, topic = $2 WHERE id = $3 RETURNING *",
+    )
+    .bind(new_name)
+    .bind(new_topic)
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row)
+}
+
+pub async fn delete_channel(pool: &PgPool, id: Uuid) -> DbResult<()> {
+    let result = sqlx::query("DELETE FROM channels WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(crate::DbError::NotFound);
+    }
+    Ok(())
+}
+
 pub async fn fetch_server_channels(pool: &PgPool, server_id: Uuid) -> DbResult<Vec<ChannelRow>> {
     let rows: Vec<ChannelRow> =
         sqlx::query_as("SELECT * FROM channels WHERE server_id = $1 ORDER BY position")

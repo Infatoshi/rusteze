@@ -1,12 +1,18 @@
 use sqlx::PgPool;
 use thiserror::Error;
 
-pub mod messages;
-pub mod users;
-pub mod servers;
+pub mod attachments;
 pub mod channels;
-pub mod members;
+pub mod dms;
 pub mod invites;
+pub mod members;
+pub mod messages;
+pub mod oauth;
+pub mod reactions;
+pub mod read_states;
+pub mod roles;
+pub mod servers;
+pub mod users;
 
 #[derive(Debug, Error)]
 pub enum DbError {
